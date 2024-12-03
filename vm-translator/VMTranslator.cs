@@ -1,60 +1,127 @@
-﻿using System;
+﻿using System.CommandLine;
 
 namespace Hack
 {
     public class VMTranslator
     {
-        public static void Main(string[] args)
+        static async Task<int> Main(string[] args)
         {
-            if (args == null || args.Length < 1)
-                return;
+            var inputArgument = new Argument<FileSystemInfo?>(
+                name: "file|directory",
+                description: "File or directory to translate.");
 
-            if (!File.Exists(args[0]))
-                return;
+            var outputOption = new Option<FileSystemInfo?>(
+                aliases: ["--output", "-o"],
+                description: "Path to output.");
 
-            string inputPath = args[0];
-            string outputPath = Path.ChangeExtension(inputPath, ".asm");
+            var verboseOption = new Option<bool>(
+                aliases: ["--silent", "-s"],
+                description: "Turn off translation status messages.");
 
-            if (!IsValidPath(outputPath))
-                return;
+            var rootCommand = new RootCommand("Translates VM language programs to Hack machine language.");
+            rootCommand.Add(inputArgument);
+            rootCommand.Add(outputOption);
+            rootCommand.Add(verboseOption);
+            rootCommand.SetHandler(Translate, inputArgument, outputOption, verboseOption);
 
-            var p = new Parser(inputPath);
-            var c = new CodeWriter(outputPath, p.hasEQ, p.hasGT, p.hasLT);
+            return await rootCommand.InvokeAsync(args);
+        }
 
-            while (p.HasMoreLines())
+        static void Translate(FileSystemInfo? inputPath, FileSystemInfo? outputPath, bool silent = false)
+        {
+            var logger = new Logger(silent);
+
+            if (inputPath == null || !(
+                File.Exists(inputPath.FullName) ||
+                Directory.Exists(inputPath.FullName)))
             {
-                p.Advance();
-                var cmdType = p.GetCommandType();
-                switch (cmdType)
+                logger.LogLine("File or directory does not exist.");
+                return;
+            }
+
+            var isFile = true;
+            if (inputPath.Attributes.HasFlag(FileAttributes.Directory))
+            {
+                isFile = false;
+            }
+            logger.LogLine($"Input from {inputPath.FullName}");
+
+            var outputFileName = (isFile ? Path.GetFileNameWithoutExtension(inputPath.Name) : inputPath.Name) + ".asm";
+            var outputDir = isFile ? Path.GetDirectoryName(inputPath.FullName)! : inputPath.FullName;
+            if (outputPath != null)
+            {
+                if (outputPath.Attributes.HasFlag(FileAttributes.Directory))
                 {
-                    case Parser.CommandType.C_ARITHMETIC:
-                        Console.WriteLine(p.Arg1());
-                        c.WriteArithmetic(p.Arg1());
-                        break;
-                    case Parser.CommandType.C_PUSH:
-                        Console.WriteLine("push " + p.Arg1() + " " + p.Arg2().ToString());
-                        c.WritePushPop(false, p.Arg1(), p.Arg2());
-                        break;
-                    case Parser.CommandType.C_POP:
-                        Console.WriteLine("pop " + p.Arg1() + " " + p.Arg2().ToString());
-                        c.WritePushPop(true, p.Arg1(), p.Arg2());
-                        break;
+                    logger.LogLine("Store in directory.");
+                    outputDir = outputPath.FullName;
+                }
+                else
+                {
+                    logger.LogLine("Store in file.");
+                    outputFileName = outputPath.Name;
+                    outputDir = Path.GetDirectoryName(outputPath.FullName)!;
                 }
             }
 
-            c.Close();
+            var codeWriter = new CodeWriter(
+                new FileInfo(Path.Combine(outputDir, outputFileName)),
+                !isFile,
+                logger);
+
+            if (isFile)
+            {
+                TranslateFile(new FileInfo(inputPath.FullName), codeWriter, logger);
+            }
+            else
+            {
+                var dirInfo = new DirectoryInfo(inputPath.FullName);
+                foreach (var fileInfo in dirInfo.GetFiles("*.vm"))
+                {
+                    TranslateFile(fileInfo, codeWriter, logger);
+                }
+            }
+
+            codeWriter.Close();
+            logger.LogLine($"Output to {Path.Combine(outputDir, outputFileName)}");
         }
 
-        static bool IsValidPath(string path)
+        static void TranslateFile(FileInfo fileInfo, CodeWriter codeWriter, Logger? logger)
         {
-            try
+            codeWriter.SetFileName(fileInfo);
+            logger?.LogLine($"Translating {fileInfo.FullName}\n");
+            var parser = new Parser(fileInfo, logger);
+            while (parser.HasMoreLines())
             {
-                Path.GetFullPath(path);
-                return true;
-            }
-            catch (Exception)
-            {
-                return false;
+                parser.Advance();
+                var commandType = parser.GetCommandType();
+                switch (commandType)
+                {
+                    case Parser.CommandType.C_ARITHMETIC:
+                        codeWriter.WriteArithmetic(parser.GetArg1());
+                        break;
+                    case Parser.CommandType.C_PUSH:
+                    case Parser.CommandType.C_POP:
+                        codeWriter.WritePushPop(commandType, parser.GetArg1(), parser.GetArg2());
+                        break;
+                    case Parser.CommandType.C_LABEL:
+                        codeWriter.WriteLabel(parser.GetArg1());
+                        break;
+                    case Parser.CommandType.C_GOTO:
+                        codeWriter.WriteGoto(parser.GetArg1());
+                        break;
+                    case Parser.CommandType.C_IF:
+                        codeWriter.WriteIf(parser.GetArg1());
+                        break;
+                    case Parser.CommandType.C_FUNCTION:
+                        codeWriter.WriteFunction(parser.GetArg1(), parser.GetArg2());
+                        break;
+                    case Parser.CommandType.C_RETURN:
+                        codeWriter.WriteReturn();
+                        break;
+                    case Parser.CommandType.C_CALL:
+                        codeWriter.WriteCall(parser.GetArg1(), parser.GetArg2());
+                        break;
+                }
             }
         }
     }

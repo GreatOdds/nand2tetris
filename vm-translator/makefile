@@ -1,6 +1,6 @@
 all: VMTranslator
 
-VMTranslator: VMTranslator.cs
+VMTranslator: VMTranslator.cs Parser.cs CodeWriter.cs Logger.cs
 	dotnet publish -o .
 
 clean:

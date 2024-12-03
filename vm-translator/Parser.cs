@@ -7,141 +7,178 @@ namespace Hack
     {
         public enum CommandType
         {
-            C_ARITHMETIC,
-            C_PUSH,
-            C_POP,
-            C_LABEL,
-            C_GOTO,
-            C_IF,
-            C_FUNCTION,
-            C_RETURN,
-            C_CALL,
-            INVALID
+            C_ARITHMETIC, // add, sub, neg, eq, gt, lt, and, or, not
+            C_PUSH, C_POP, // push SEGMENT INDEX, pop SEGMENT INDEX
+            C_LABEL, C_GOTO, C_IF, // label LABEL, goto LABEL, if-goto LABEL
+            C_FUNCTION, C_RETURN, C_CALL, // function NAME nVars, return, call NAME nARGS
+            C_INVALID
         }
 
-        /***
-        ^\s*
-        (?<command>
-            [a-z]+
-        )
-        (?:
-            \s*
-            (?<segment>
-                [a-z]+
-            )
-            \s*
-            (?<index>
-                \d+
-            )
-        )?
-        \s*(?:\/\/.*)?$
-         ***/
-        private static readonly Regex command =
-            new(@"^\s*(?<command>[a-z]+)(?:\s*(?<arg1>[a-z]+)\s*(?<arg2>\d+))?\s*(?:\/\/.*)?$");
-
-        private List<string> lines = [];
-        private int currentLine = -1;
-        private CommandType commandType = CommandType.INVALID;
-        private string arg1 = "";
-        private int arg2 = -1;
-
-        public bool hasEQ = false;
-        public bool hasGT = false;
-        public bool hasLT = false;
-
-        public Parser(string inputPath)
+        struct Command
         {
-            using (var sr = File.OpenText(inputPath))
+            public CommandType type = CommandType.C_INVALID;
+            public string arg1 = string.Empty;
+            public int arg2 = -1;
+
+            public Command() { }
+        }
+
+        private static readonly Regex commandMatch = new(
+            @"^\s*(?<command>[a-z-]+)(?:[^\S\n]*(?<arg1>[a-zA-Z_.$:][a-zA-Z_.$:0-9]*)(?:[^\S\n]*(?<arg2>\d+))?)?[^\S\n]*(?:\/\/.*)?$");
+        private List<Command> commands = new List<Command>();
+        private int currentLine = -1;
+
+        public Parser(FileInfo inputFile, Logger? logger)
+        {
+            using (var sr = inputFile.OpenText())
             {
-                string? line;
+                var line = "";
                 while ((line = sr.ReadLine()) != null)
                 {
-                    var match = command.Match(line);
-                    if (!match.Success)
-                        continue;
+                    var match = commandMatch.Match(line);
+                    if (!match.Success) continue;
+
                     var groups = match.Groups;
-                    var cmd = groups["command"].Value;
-                    if (!hasEQ && cmd == "eq")
-                        hasEQ = true;
-                    if (!hasGT && cmd == "gt")
-                        hasGT = true;
-                    if (!hasLT && cmd == "lt")
-                        hasLT = true;
-                    line = (
-                        cmd
-                        + (groups["arg1"].Value != string.Empty ? (" " + groups["arg1"].Value) : "")
-                        + (groups["arg2"].Value != string.Empty ? (" " + groups["arg2"].Value) : "")
-                    );
-                    lines.Add(line);
+                    Group? group;
+                    if (groups.TryGetValue("command", out group) && group.Value != string.Empty)
+                    {
+                        var command = new Command();
+                        var commandStr = group.Value;
+                        command.type = StringToCommandType(commandStr);
+
+                        switch (command.type)
+                        {
+                            case CommandType.C_ARITHMETIC:
+                            case CommandType.C_RETURN:
+                                command.arg1 = group.Value; // Store command in arg1
+                                break;
+                            case CommandType.C_LABEL:
+                            case CommandType.C_GOTO:
+                            case CommandType.C_IF:
+                                if (groups.TryGetValue("arg1", out group) && group.Value != string.Empty)
+                                    command.arg1 = group.Value;
+                                else
+                                    command.type = CommandType.C_INVALID;
+                                break;
+                            case CommandType.C_PUSH:
+                            case CommandType.C_POP:
+                            case CommandType.C_FUNCTION:
+                            case CommandType.C_CALL:
+                                if (groups.TryGetValue("arg1", out group) && group.Value != string.Empty)
+                                    command.arg1 = group.Value;
+                                else
+                                    command.type = CommandType.C_INVALID;
+                                if (command.type != CommandType.C_INVALID && groups.TryGetValue("arg2", out group) && group.Value != string.Empty)
+                                    if (!int.TryParse(group.Value, out command.arg2))
+                                        command.type = CommandType.C_INVALID;
+                                break;
+                        }
+                        if (command.type == CommandType.C_INVALID) continue;
+
+                        commands.Add(command);
+                    }
                 }
+            }
+
+            foreach (var command in commands)
+            {
+                LogCommand(command, logger);
             }
         }
 
         public bool HasMoreLines()
         {
-            return (currentLine + 1) < lines.Count;
-        }
-
-        public void Reset()
-        {
-            currentLine = -1;
+            return currentLine < (commands.Count - 1);
         }
 
         public void Advance()
         {
-            currentLine++;
-            commandType = CommandType.INVALID;
-            arg1 = "";
-            arg2 = -1;
-            var groups = command.Match(lines[currentLine]).Groups;
-
-            var cmd = groups["command"].Value;
-            switch (cmd)
-            {
-                case "push":
-                    commandType = CommandType.C_PUSH;
-                    arg1 = groups["arg1"].Value;
-                    if (!int.TryParse(groups["arg2"].Value, out arg2))
-                    {
-                        arg2 = -1;
-                    }
-                    break;
-                case "pop":
-                    commandType = CommandType.C_POP;
-                    arg1 = groups["arg1"].Value;
-                    if (!int.TryParse(groups["arg2"].Value, out arg2))
-                    {
-                        arg2 = -1;
-                    }
-                    break;
-                case "add":
-                case "sub":
-                case "neg":
-                case "not":
-                case "and":
-                case "or":
-                case "eq":
-                case "gt":
-                case "lt":
-                    commandType = CommandType.C_ARITHMETIC;
-                    arg1 = groups["command"].Value;
-                    break;
-            }
+            currentLine += 1;
         }
 
         public CommandType GetCommandType()
         {
-            return commandType;
+            return commands[currentLine].type;
         }
 
-        public string Arg1()
+        public string GetArg1()
         {
-            return arg1;
+            return commands[currentLine].arg1;
         }
 
-        public int Arg2()
+        public int GetArg2()
         {
-            return arg2;
+            return commands[currentLine].arg2;
+        }
+
+        CommandType StringToCommandType(string command)
+        {
+            switch (command)
+            {
+                case "add":
+                case "sub":
+                case "neg":
+                case "eq":
+                case "gt":
+                case "lt":
+                case "and":
+                case "or":
+                case "not":
+                    return CommandType.C_ARITHMETIC;
+                case "push":
+                    return CommandType.C_PUSH;
+                case "pop":
+                    return CommandType.C_POP;
+                case "label":
+                    return CommandType.C_LABEL;
+                case "goto":
+                    return CommandType.C_GOTO;
+                case "if-goto":
+                    return CommandType.C_IF;
+                case "function":
+                    return CommandType.C_FUNCTION;
+                case "return":
+                    return CommandType.C_RETURN;
+                case "call":
+                    return CommandType.C_CALL;
+                default:
+                    return CommandType.C_INVALID;
+            }
+        }
+
+        void LogCommand(Command command, Logger? logger)
+        {
+            switch (command.type)
+            {
+                case CommandType.C_ARITHMETIC:
+                case CommandType.C_RETURN:
+                    logger?.LogLine(command.arg1);
+                    break;
+                case CommandType.C_LABEL:
+                    logger?.LogLine($"label {command.arg1}");
+                    break;
+                case CommandType.C_GOTO:
+                    logger?.LogLine($"goto {command.arg1}");
+                    break;
+                case CommandType.C_IF:
+                    logger?.LogLine($"if-goto {command.arg1}");
+                    break;
+                case CommandType.C_PUSH:
+                    logger?.LogLine($"push {command.arg1} {command.arg2}");
+                    break;
+                case CommandType.C_POP:
+                    logger?.LogLine($"pop {command.arg1} {command.arg2}");
+                    break;
+                case CommandType.C_FUNCTION:
+                    logger?.LogLine($"function {command.arg1} {command.arg2}");
+                    break;
+                case CommandType.C_CALL:
+                    logger?.LogLine($"call {command.arg1} {command.arg2}");
+                    break;
+                case CommandType.C_INVALID:
+                default:
+                    break;
+            }
         }
     }
 }
